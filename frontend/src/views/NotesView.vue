@@ -25,7 +25,7 @@ async function addUrl() {
   if (!urlInput.value.trim()) return
   try {
     const n = await notes.addUrl(urlInput.value.trim())
-    message.success(`已添加：${n.title}`)
+    message.info(`已添加：${n.title}`)
     urlInput.value = ''
   } catch (e) {
     message.error((e as Error).message)
@@ -36,7 +36,7 @@ async function addText() {
   if (!textInput.value.trim()) return
   try {
     const n = await notes.addText(textInput.value, textTitle.value || undefined)
-    message.success(`已添加：${n.title}`)
+    message.info(`已添加：${n.title}`)
     textInput.value = ''
     textTitle.value = ''
   } catch (e) {
@@ -47,7 +47,7 @@ async function addText() {
 async function uploadOne(file: File) {
   try {
     const n = await notes.uploadFile(file)
-    message.success(`已添加：${n.title}`)
+    message.info(`已添加：${n.title}`)
   } catch (e) {
     message.error(`${file.name}: ${(e as Error).message}`)
   }
@@ -94,9 +94,9 @@ function formatSize(n: number): string {
 const typeTag: Record<string, string> = {
   url: 'info',
   text: 'info',
-  pdf: 'success',
+  pdf: 'info',
   image: 'warning',
-  docx: 'success',
+  docx: 'info',
   pptx: 'info',
   xlsx: 'info',
   csv: 'default',
@@ -106,6 +106,17 @@ const typeTag: Record<string, string> = {
 function sourceLabel(t: string) {
   if (t === 'image') return '图片/OCR'
   return t.toUpperCase()
+}
+
+function downloadNote(id: string, title: string) {
+  const url = "/api/notes/" + encodeURIComponent(id) + "/download"
+  const safe = (title || "note").replace(/[^a-zA-Z0-9._-]+/g, "_") + ".md"
+  const a = document.createElement("a")
+  a.href = url
+  a.download = safe
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 </script>
 
@@ -148,7 +159,7 @@ function sourceLabel(t: string) {
         </div>
         <div v-if="notes.uploadProgress" style="margin-top: 10px; padding: 8px; background: var(--hover-bg); border-radius: 4px">
           <n-spin v-if="notes.uploadProgress.status === 'uploading'" size="small" />
-          <n-text v-if="notes.uploadProgress.status === 'done'" type="success">✓ {{ notes.uploadProgress.name }}</n-text>
+          <n-text v-if="notes.uploadProgress.status === 'done'" type="info">✓ {{ notes.uploadProgress.name }}</n-text>
           <n-text v-else-if="notes.uploadProgress.status === 'failed'" type="error">× {{ notes.uploadProgress.name }}：{{ notes.uploadProgress.message }}</n-text>
           <n-text v-else>{{ notes.uploadProgress.name }} 上传中…</n-text>
         </div>
@@ -192,15 +203,18 @@ function sourceLabel(t: string) {
               <n-space align="center" :wrap="false" style="overflow: hidden">
                 <n-text strong style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ n.title }}</n-text>
                 <n-tag size="small" :type="(typeTag[n.source_type] as any) || 'default'">{{ sourceLabel(n.source_type) }}</n-tag>
-                <n-button v-if="!n.embedded" type="warning" size="tiny" quaternary class="reembed-btn" @click.stop="notes.reembed(n.id).then(() => message.success(String.fromCharCode(24050,26032,20837,20840))).catch(e => message.error(e.message))">未 embedding · 重试</n-button>
+                <n-button v-if="!n.embedded" type="warning" size="tiny" quaternary class="reembed-btn" @click.stop="notes.reembed(n.id).then(() => message.info(String.fromCharCode(24050,26032,20837,20840))).catch(e => message.error(e.message))">未 embedding · 重试</n-button>
                 <n-tag v-else size="small" :bordered="false">{{ n.chunk_count }} chunks</n-tag>
               </n-space>
-              <n-popconfirm @positive-click="notes.remove(n.id).then(() => message.success('已删除'))">
-                <template #trigger>
-                  <n-button text size="small" type="error">删除</n-button>
-                </template>
-                删除该笔记？
-              </n-popconfirm>
+              <n-space align="center" :wrap="false" size="small">
+                <n-button text size="small" type="info" @click.stop="downloadNote(n.id, n.title)">下载</n-button>
+                <n-popconfirm @positive-click="notes.remove(n.id).then(() => message.info(String.fromCharCode(24050,26032,20837,20840)))">
+                  <template #trigger>
+                    <n-button text size="small" type="error">删除</n-button>
+                  </template>
+                  删除该笔记？
+                </n-popconfirm>
+              </n-space>
             </n-space>
           </template>
           <n-text v-if="n.summary" depth="3" style="font-size: 12px">{{ n.summary }}</n-text>

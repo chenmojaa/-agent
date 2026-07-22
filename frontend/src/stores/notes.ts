@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import {
   listNotes, getStats, ingestUrl, ingestText, deleteNote,
-  ingestFile, ingestImage, type Note, type NotesStats,
+  ingestFile, ingestImage, reembedNote,
+  type Note, type NotesStats,
 } from '@/api/notes'
 
 interface State {

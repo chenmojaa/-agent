@@ -47,23 +47,28 @@ def _parse_embedding_response(j):
   - {"base_resp": {"status_code": 1004, "status_msg": "..."}}   MiniMax / Volcengine
   - {"error": {...}}                                            OpenAI error style
   """
-  base = j.get("base_resp") if isinstance(j, dict) else None
-  if isinstance(base, dict) and base.get("status_code") not in (None, 0, "0"):
-    raise RuntimeError(
-      f"Embedding upstream error (status_code={base.get('status_code')}): {base.get('status_msg') or j}"
-    )
-  if isinstance(j, dict) and isinstance(j.get("error"), dict):
-    raise RuntimeError(f"Embedding upstream error: {j['error']}")
-
-  raw = (j.get("data") if isinstance(j, dict) else None) or (j.get("embeddings") if isinstance(j, dict) else None)
+  # If j is a bare list, that itself is the embeddings array.
+  if isinstance(j, list):
+    raw = j
+  elif isinstance(j, dict):
+    base = j.get("base_resp") if isinstance(j.get("base_resp"), dict) else None
+    if base and base.get("status_code") not in (None, 0, "0"):
+      _sc = base.get("status_code")
+      _sm = base.get("status_msg") or j
+      raise RuntimeError("Embedding upstream error (status_code=" + str(_sc) + "): " + str(_sm))
+    if isinstance(j.get("error"), dict):
+      raise RuntimeError("Embedding upstream error: " + str(j["error"]))
+    raw = j.get("vectors") or j.get("embeddings") or j.get("data")
+  else:
+    raw = None
   if raw is None:
-    raise RuntimeError(f"Embedding response missing 'data'/'embeddings': {j}")
+    raise RuntimeError("Embedding response missing vectors/embeddings/data: " + str(j))
 
   vecs = []
   order = []
   for i, item in enumerate(raw):
     if isinstance(item, dict):
-      emb = item.get("embedding")
+      emb = (item.get("embedding") or item.get("vectors") or item.get("vector") or item.get("data"))
       if emb is None:
         raise RuntimeError(f"Embedding item {i} missing 'embedding': {item}")
       vecs.append(emb)
@@ -93,9 +98,48 @@ def _build_body(inputs, model, base_url, mode="db"):
     return {"model": model, "type": mode, "texts": list(inputs)}
   return {"model": model, "input": list(inputs)}
 
+# Conservative batch size for MiniMax endpoints.
+# Long empty / whitespace-only inputs can also trigger 2013 invalid_params upstream.
+EMBED_BATCH = 32
+# Per-item char cap to dodge upstream token-length limits.
+MAX_CHARS_PER_ITEM = 1500
+
+
+def _sanitize(texts):
+  """Strip empties + clamp item length to MAX_CHARS_PER_ITEM.
+
+  Truncation tries to land at a sentence/paragraph boundary to keep semantics.
+  """
+  if not texts:
+    return []
+  out = []
+  for t in texts:
+    if not isinstance(t, str):
+      continue
+    s = t.strip()
+    if not s:
+      continue
+    if len(s) > MAX_CHARS_PER_ITEM:
+      cut = s[:MAX_CHARS_PER_ITEM]
+      for sep in ("\n\n", "。", "!", "?", " ", "\n"):
+        idx = cut.rfind(sep)
+        if idx > MAX_CHARS_PER_ITEM // 2:
+          cut = cut[:idx]
+          break
+      s = cut.strip()
+      if not s:
+        continue
+    out.append(s)
+  return out
+
+
 def embed_texts(texts, api_key=None, base_url=None, model=None, mode="db"):
   """Embed a list of strings via an OpenAI-compatible /v1/embeddings endpoint."""
   if not texts:
+    return []
+
+  cleaned = _sanitize(texts)
+  if not cleaned:
     return []
 
   key = _resolve_key(api_key)
@@ -113,14 +157,23 @@ def embed_texts(texts, api_key=None, base_url=None, model=None, mode="db"):
   }
 
   all_vecs = []
-  batch = 100
   with httpx.Client(timeout=60.0) as cli:
-    for i in range(0, len(texts), batch):
-      chunk = texts[i:i + batch]
+    for i in range(0, len(cleaned), EMBED_BATCH):
+      chunk = cleaned[i:i + EMBED_BATCH]
       body = _build_body(chunk, m, base_url, mode=mode)
       r = cli.post(url, headers=headers, json=body)
       if r.status_code != 200:
-        raise RuntimeError(f"Embedding endpoint {url} returned {r.status_code}: {r.text[:300]}")
+        # Surface upstream status_msg when present.
+        try:
+          j = r.json()
+          base_resp = j.get("base_resp") or {}
+          msg = base_resp.get("status_msg") or j.get("error") or j
+        except Exception:
+          msg = r.text
+        raise RuntimeError(
+          f"Embedding endpoint {url} returned {r.status_code} "
+          f"(model={m}, batch={len(chunk)}, mode={mode}): {msg}"
+        )
       try:
         j = r.json()
       except Exception as e:

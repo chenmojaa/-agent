@@ -56,7 +56,7 @@ def _build_model(provider=None, model=None, api_key=None, base_url=None, reasoni
   if resolved_url:
     kwargs["base_url"] = resolved_url
   if extra:
-    kwargs["model_kwargs"] = extra
+    kwargs["extra_body"] = extra
   return ChatOpenAI(**kwargs)
 
 

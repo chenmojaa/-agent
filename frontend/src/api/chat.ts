@@ -22,6 +22,8 @@ export interface ChatRequest {
   base_url?: string | null
   api_key?: string | null
   reasoning_level?: string | null
+  embedding_model?: string | null
+  embedding_base_url?: string | null
 }
 
 export interface ChatStreamEvent {
@@ -50,6 +52,8 @@ export async function* chatStream(req: ChatRequest): AsyncGenerator<ChatStreamEv
     base_url: req.base_url || undefined,
     api_key: req.api_key || undefined,
     reasoning_level: req.reasoning_level || undefined,
+    embedding_model: req.embedding_model || undefined,
+    embedding_base_url: req.embedding_base_url || undefined,
   })
   for await (const ev of stream) {
     if (ev.data === "[DONE]") { yield { type: "done" }; return }

@@ -30,7 +30,7 @@ async function doDetect() {
   try {
     const r = await detectModels({ base_url: formBaseUrl.value.trim(), api_key: formApiKey.value.trim() })
     detected.value = { provider: r.provider, models: r.models }
-    message.success(`识别到 ${r.models.length} 个模型`)
+    message.info(`识别到 ${r.models.length} 个模型`)
   } catch (e) {
     message.error((e as Error).message)
     detected.value = null
@@ -55,7 +55,7 @@ function saveEntry() {
     createdAt: new Date().toISOString(),
   }
   models.add(entry)
-  message.success('已添加，可在聊天页选择')
+  message.info('已添加，可在聊天页选择')
   formApiKey.value = ''
   detected.value = null
 }

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from typing import Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Header
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
+from sqlalchemy import text
 
 from app.storage.db import Note, get_session
 from app.storage.vector import collection_stats, delete_note_chunks
@@ -196,7 +198,7 @@ async def api_list_notes(limit: int = 50, offset: int = 0):
   with get_session() as s:
     stmt = select(Note).order_by(Note.created_at.desc()).offset(offset).limit(limit)
     notes = s.exec(stmt).all()
-    total = len(s.exec(select(Note)).all())
+    total = s.exec(text("SELECT COUNT(*) FROM notes")).scalar()
   return {"items": [_to_dict(n) for n in notes], "total": total, "limit": limit, "offset": offset}
 
 
@@ -209,6 +211,32 @@ async def api_get_note(note_id: str):
   return _to_dict(note)
 
 
+@router.get("/notes/{note_id}/download")
+async def api_download_note(note_id: str):
+  import os
+  from urllib.parse import quote
+  with get_session() as s:
+    note = s.get(Note, note_id)
+    if not note:
+      raise HTTPException(status_code=404, detail="Note not found")
+    title = note.title or "note"
+    content_path = note.content_path
+  ascii_name = "".join(c for c in title if c.isalnum() or c in (" ", ".", "_", "-")).strip() or "note"
+  quoted_name = quote(ascii_name, safe="-_.")
+  if content_path and os.path.isfile(content_path):
+    return FileResponse(
+      path=content_path,
+      filename=ascii_name + ".md",
+      media_type="text/markdown; charset=utf-8",
+      headers={"Content-Disposition": "attachment; filename=" + quoted_name + ".md"},
+    )
+  summary = (note.summary or "").encode("utf-8")
+  data = (b"# " + title.encode("utf-8") + b"\n\n" + summary + b"\n")
+  return Response(
+    content=data,
+    media_type="text/markdown; charset=utf-8",
+    headers={"Content-Disposition": "attachment; filename=" + quoted_name + ".md"},
+  )
 @router.post("/notes/{note_id}/reembed")
 async def api_reembed_note(
   note_id: str,
@@ -265,20 +293,27 @@ async def api_reembed_note(
 
 @router.delete("/notes/{note_id}")
 async def api_delete_note(note_id: str):
+  import os
+  content_path = None
   with get_session() as s:
     note = s.get(Note, note_id)
     if not note:
       raise HTTPException(status_code=404, detail="Note not found")
+    content_path = note.content_path
     s.delete(note)
     s.commit()
   chunks_deleted = delete_note_chunks(note_id)
-  return {"deleted": note_id, "chunks_deleted": chunks_deleted}
-
-
+  if content_path and os.path.isfile(content_path):
+    try:
+      os.remove(content_path)
+    except OSError:
+      pass
+  gone = bool(content_path and not os.path.exists(content_path))
+  return {"deleted": note_id, "chunks_deleted": chunks_deleted, "file_removed": gone}
 @router.get("/notes-stats")
 async def api_stats():
   with get_session() as s:
-    total = len(s.exec(select(Note)).all())
+    total = s.exec(text("SELECT COUNT(*) FROM notes")).scalar()
     embedded = len(s.exec(select(Note).where(Note.embedded == True)).all())  # noqa: E712
   return {
     "sqlite": {"total_notes": total, "embedded_notes": embedded},

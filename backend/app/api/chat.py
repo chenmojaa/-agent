@@ -27,6 +27,8 @@ class ChatRequest(BaseModel):
   base_url: str | None = None
   api_key: str | None = None
   reasoning_level: str | None = None
+  embedding_model: str | None = None
+  embedding_base_url: str | None = None
 
 
 def _extract_query(messages: list[Message]) -> str:
@@ -44,6 +46,9 @@ async def chat(body: ChatRequest, x_api_key: str | None = Header(None, alias="X-
   query = _extract_query(body.messages)
   effective_api_key = (body.api_key or x_api_key or "").strip() or None
   effective_base_url = (body.base_url or "").strip() or None
+  effective_emb_key = (body.api_key or x_api_key or "").strip() or None
+  effective_emb_base = (body.embedding_base_url or body.base_url or "").strip() or None
+  effective_emb_model = (body.embedding_model or "").strip() or None
 
   session_id = body.session_id
   if not session_id:
@@ -69,7 +74,7 @@ async def chat(body: ChatRequest, x_api_key: str | None = Header(None, alias="X-
 
   if body.use_rag and query:
     try:
-      retrieved = hybrid_search(query, top_k=5, api_key=effective_api_key, base_url=effective_base_url)
+      retrieved = hybrid_search(query, top_k=5, api_key=effective_emb_key, base_url=effective_emb_base, model=effective_emb_model)
       initial_state["retrieved_chunks"] = retrieved
     except Exception:
       initial_state["retrieved_chunks"] = []

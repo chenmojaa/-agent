@@ -1,6 +1,7 @@
 """Hybrid search: vector (Chroma) + keyword (FTS5) -> dedupe + rerank."""
 from __future__ import annotations
 
+import logging
 from app.embeddings.factory import embed_texts
 from app.storage.vector import search as vector_search
 from app.storage.db import fts_search
@@ -15,6 +16,7 @@ def hybrid_search(
   top_k: int = 5,
   api_key: str | None = None,
   base_url: str | None = None,
+  model: str | None = None,
 ) -> list[dict]:
   """Combine vector + keyword search, dedupe, return top_k.
 
@@ -24,13 +26,13 @@ def hybrid_search(
   # vector search
   vec_hits = []
   try:
-    emb = embed_texts([query], api_key=api_key, base_url=base_url, mode="query")[0]
+    emb = embed_texts([query], api_key=api_key, base_url=base_url, model=model, mode="query")[0]
     vec_hits = vector_search(emb, top_k=top_k * 2)
     for h in vec_hits:
       d = h.get("distance")
       h["vec_score"] = max(0.0, 1.0 - (d if d is not None else 1.0))
-  except Exception:
-    pass
+  except Exception as e:
+    logging.getLogger(__name__).warning("hybrid_search embed failed: %s", e)
 
   # keyword search (FTS5 / BM25)
   kw_hits = []
@@ -39,8 +41,8 @@ def hybrid_search(
     for h in kw_hits:
       s = h.get("score") or 0.0
       h["kw_score"] = 1.0 / (1.0 + abs(s))
-  except Exception:
-    pass
+  except Exception as e:
+    logging.getLogger(__name__).warning("hybrid_search fts failed: %s", e)
 
   # merge + dedupe by (note_id, chunk_index)
   merged = {}

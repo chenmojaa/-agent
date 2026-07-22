@@ -43,6 +43,7 @@ export const useChatStore = defineStore("chat", {
       const baseUrl = sel?.baseUrl
       const apiKey = sel?.apiKey
       const reasoning = sel?.reasoning
+      const embeddingModel = sel?.embeddingModel
 
       try {
         const stream = chatStream({
@@ -54,6 +55,8 @@ export const useChatStore = defineStore("chat", {
           base_url: baseUrl ?? null,
           api_key: apiKey ?? null,
           reasoning_level: reasoning ?? null,
+          embedding_model: embeddingModel ?? null,
+          embedding_base_url: baseUrl ?? null,
         })
         // 累积原始（含 <think>），渲染前 strip
         let rawAccumulated = ""

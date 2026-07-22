@@ -1,4 +1,19 @@
 <script setup lang="ts">
+const BRAND_BLUE = "#3b82f6"
+const naiveOverrides = computed(() => ({
+  common: {
+    primaryColor: BRAND_BLUE,
+    primaryColorHover: "#60a5fa",
+    primaryColorPressed: "#2563eb",
+    primaryColorSuppl: BRAND_BLUE,
+    infoColor: BRAND_BLUE,
+    infoColorHover: "#60a5fa",
+    infoColorPressed: "#2563eb",
+    successColor: BRAND_BLUE,
+    successColorHover: "#60a5fa",
+    successColorPressed: "#2563eb",
+  },
+}))
 import { computed, onMounted, watch, ref } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useSessionsStore } from '@/stores/sessions'
@@ -25,7 +40,7 @@ function toggleSider() {
 </script>
 
 <template>
-  <n-config-provider :theme="naiveTheme">
+  <n-config-provider :theme="naiveTheme" :theme-overrides="naiveOverrides">
     <n-message-provider>
       <n-layout style="height: 100vh">
         <n-layout-header bordered style="padding: 8px 16px; display: flex; align-items: center; justify-content: space-between; height: 48px">
