@@ -22,7 +22,11 @@ function gotoNotes() {
 }
 
 async function openSession(id: string) {
-  if (id === activeId.value) return
+  if (id === activeId.value) {
+    // Same session re-clicked: force a reload so the UI always reflects latest server state.
+    await chat.loadFromSession(id)
+    return
+  }
   router.push({ name: 'chat-id', params: { id } })
 }
 

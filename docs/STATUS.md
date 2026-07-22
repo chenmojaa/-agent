@@ -241,3 +241,66 @@ fts_search("牛魔王的来历是什么", top_k=3)    # 3 rows
    - `hybrid_search fts failed` after both passes → swallowed upstream; the new query has FTS5-only-specific characters. Add to the strip set.
 
 For the next LLM: these 3 files have been verified after a manual reload (kill python.exe + `python -m uvicorn ...`). Do NOT reintroduce `except: pass` in hybrid_search or revert fts_search to a single bound-parameter MATCH call — both regressions are now documented and tests depend on them.
+
+---
+
+## v0.9 -- External tunnel (vicp.fun) + dev-server config (2026-07-22)
+
+### Goal
+Make the project reachable from the public Internet through the user's 贝锐花生壳 (vicp.fun) tunnel.
+Tunnel:  http://11gv92qt74799.vicp.fun  ->  10.0.0.110:28 (花生壳客户端 PID 5312 already binds 0.0.0.0:28)
+
+### What changed
+- frontend/vite.config.ts:
+  host: '0.0.0.0'  (was 127.0.0.1)
+  strictPort: true
+  allowedHosts: ['11gv92qt74799.vicp.fun', '10.0.0.110', 'localhost', '127.0.0.1']  -- prevents Vite 6 host-check 403
+  proxy /api : proxyTimeout 600000, timeout 600000  (SSE survives tunnel latency)
+
+- backend:
+  launched with --host 0.0.0.0 --port 8001 (vite proxies /api to it).
+
+- scripts/add-portproxy.ps1 (first attempt, REMOVED once we discovered the conflict):
+  netsh interface portproxy add v4tov4 listenport=28 listenaddress=0.0.0.0 connectport=5173 connectaddress=127.0.0.1
+  Firewall rules HD_Tunnel_28 / HD_Vite_5173 / HD_Backend_8001
+  Do not re-add -- 花生壳客户端 occupies 0.0.0.0:28.
+
+- scripts/remove-portproxy.ps1:
+  netsh delete v4tov4 listenport=28 listenaddress=0.0.0.0
+  Remove-NetFirewallRule HD_Tunnel_28
+
+- scripts/start-all.ps1:
+  kill old 5173/8001 -> uvicorn -> vite -> probe -> apply portproxy (kept for hosts that DO need it).
+
+### Final topology
+外网  http://11gv92qt74799.vicp.fun
+  -> 花生壳服务器 (vicp.fun)
+  -> 花生壳客户端 HskDDNS (PID 21644) / orayfilesvr (PID 5312)  本机 0.0.0.0:28
+  -> 反向连接 回 花生壳后台配置的「内网地址」 -> 127.0.0.1:5173 (vite)
+  -> vite 代理 /api -> 127.0.0.1:8001 (FastAPI)
+  -> https://api.minimax.chat/v1/...   (LLM + embedding)
+
+### 花生壳后台必须做的事
+在「网站」映射的编辑页：
+  映射名称: 任意
+  映射类型: HTTP
+  外网地址: http://11gv92qt74799.vicp.fun
+  内网地址: 127.0.0.1:5173   (NOT 10.0.0.110:28 -- 28 is the花生壳 client itself)
+  带宽: 1Mbps (existing)
+
+诊断页的「请确认 10.0.0.110:13001 是否正常」是花生壳诊断自己的服务，与本项目无关。
+
+### One-shot start
+管理员 PowerShell 跑：D:\one_agent\scripts\start-all.ps1
+  杀旧 -> 启动后端 -> 启动前端 -> 探活 -> 应用 (历史) portproxy
+
+### Verification
+- 本机:  curl http://127.0.0.1:5173/                  -> 200 (HTML)
+         curl http://127.0.0.1:5173/api/health         -> {"status":"ok"}
+- 外网:  从任意网络打开 http://11gv92qt74799.vicp.fun/ -> 应当看到 HD 聊天页
+- uvicorn.err.log 末段: POST ... api.minimax.chat/v1/chat/completions "200 OK" 表示设置页 key 已生效。
+
+### Notes for the next LLM
+Keep frontend/vite.config.ts host=0.0.0.0 + allowedHosts.
+Do NOT re-add netsh portproxy 28 -> 5173: 花生壳 client occupies 0.0.0.0:28 and will reject the rule.
+If the user switches tunnel (frp / cpolar / self-hosted nginx), update start-all.ps1 accordingly.
