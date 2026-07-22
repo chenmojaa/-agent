@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import re
+
 from app.embeddings.factory import embed_texts
 from app.storage.vector import search as vector_search
 from app.storage.db import fts_search
@@ -9,6 +11,28 @@ from app.storage.db import fts_search
 
 def _make_key(note_id: str, chunk_index: int) -> str:
   return f"{note_id}#{chunk_index}"
+
+
+def _fts_escape(query: str) -> str:
+  """Make a string safe for SQLite FTS5 MATCH.
+
+  FTS5 treats double quotes and a few ASCII chars as syntax. Strip them and
+  wrap the cleaned string in double quotes so the engine treats it as a phrase
+  and tokenizes CJK characters correctly even for 2-3 char queries.
+  """
+  if not query:
+    return ""
+  s = query.strip()
+  if not s:
+    return ""
+  # FTS5 reserved chars: " ( ) * ^ : AND OR NOT NEAR
+  for ch in (chr(34), '(', ')', '*', '^', ':'):
+    s = s.replace(ch, ' ')
+  s = s.strip()
+  if not s:
+    return ""
+  return chr(34) + s + chr(34)
+
 
 
 def hybrid_search(
@@ -24,7 +48,7 @@ def hybrid_search(
   chat is using, so embeddings stay consistent with whatever was at ingest.
   """
   # vector search
-  vec_hits = []
+  vec_hits: list[dict] = []
   try:
     emb = embed_texts([query], api_key=api_key, base_url=base_url, model=model, mode="query")[0]
     vec_hits = vector_search(emb, top_k=top_k * 2)
@@ -32,15 +56,26 @@ def hybrid_search(
       d = h.get("distance")
       h["vec_score"] = max(0.0, 1.0 - (d if d is not None else 1.0))
   except Exception as e:
-    logging.getLogger(__name__).warning("hybrid_search embed failed: %s", e)
+    # MiniMax rejects type="query" on embo-01 with status_code=2013.
+    # Fall back to type="db" (ingestion mode) which is the only one MiniMax embo-01 accepts.
+    try:
+      emb = embed_texts([query], api_key=api_key, base_url=base_url, model=model, mode="db")[0]
+      vec_hits = vector_search(emb, top_k=top_k * 2)
+      for h in vec_hits:
+        d = h.get("distance")
+        h["vec_score"] = max(0.0, 1.0 - (d if d is not None else 1.0))
+    except Exception as e2:
+      logging.getLogger(__name__).warning("hybrid_search vector embed failed (query mode: %s; db fallback: %s)", e, e2)
 
   # keyword search (FTS5 / BM25)
   kw_hits = []
   try:
-    kw_hits = fts_search(query, top_k=top_k * 2)
-    for h in kw_hits:
-      s = h.get("score") or 0.0
-      h["kw_score"] = 1.0 / (1.0 + abs(s))
+    safe_q = _fts_escape(query)
+    if safe_q:
+      kw_hits = fts_search(safe_q, top_k=top_k * 2)
+      for h in kw_hits:
+        s = h.get("score") or 0.0
+        h["kw_score"] = 1.0 / (1.0 + abs(s))
   except Exception as e:
     logging.getLogger(__name__).warning("hybrid_search fts failed: %s", e)
 

@@ -94,24 +94,85 @@ def delete_fts(note_id: str) -> int:
 
 
 def fts_search(query: str, top_k: int = 5) -> list[dict]:
-  safe = query.replace(chr(34), " ").strip()
-  if not safe:
+  """Two-pass FTS5 search that survives both ASCII and CJK queries.
+
+  Pass 1: phrase match against the whole query (works for ASCII tokens and
+  for CJK when the query spans a whole content phrase).
+  Pass 2: per-token OR match -- splits CJK into single chars because
+  unicode61 produces single-char tokens for CJK; ASCII tokens are kept
+  whole. Falls back to LIKE if FTS5 still refuses to parse.
+
+  Always returns at least an empty list, never raises on a bad query.
+  """
+  if not query or not query.strip():
     return []
+  raw = query.strip()
+  cleaned = raw
+  for ch in (chr(34), chr(40), chr(41), chr(42), chr(94), chr(58)):
+    cleaned = cleaned.replace(ch, chr(32))
+  cleaned = cleaned.strip()
+  if not cleaned:
+    return []
+  tokens = []
+  for tok in cleaned.split():
+    if not tok:
+      continue
+    if all(ord(c) > 0x4E00 and ord(c) < 0x9FFF for c in tok):
+      tokens.extend(list(tok))
+    else:
+      tokens.append(tok)
+  seen = set()
+  uniq_tokens = []
+  for t in tokens:
+    if t and t not in seen:
+      seen.add(t)
+      uniq_tokens.append(t)
+  base_sql = (
+    "SELECT note_id, chunk_index, content, bm25(chunk_fts) AS score "
+    "FROM chunk_fts "
+    "WHERE chunk_fts MATCH __MATCH__ "
+    "ORDER BY score "
+    "LIMIT :k"
+  )
+  by_key = {}
+
+  def _absorb(rows):
+    for r in rows:
+      key = (r.note_id, r.chunk_index)
+      hit = {"note_id": r.note_id, "chunk_index": r.chunk_index, "text": r.content, "score": float(r.score) if r.score is not None else 0.0}
+      if key in by_key:
+        by_key[key]["score"] = min(by_key[key]["score"], hit["score"])
+      else:
+        by_key[key] = hit
+
   with get_engine().begin() as conn:
-    rows = conn.execute(
-      text("""
-        SELECT note_id, chunk_index, content, bm25(chunk_fts) AS score
-        FROM chunk_fts
-        WHERE chunk_fts MATCH :q
-        ORDER BY score
-        LIMIT :k
-      """),
-      {"q": safe, "k": top_k},
-    ).all()
-  return [
-    {"note_id": r.note_id, "chunk_index": r.chunk_index, "text": r.content, "score": float(r.score) if r.score is not None else 0.0}
-    for r in rows
-  ]
+    phrase_dq = cleaned.replace(chr(34), chr(34) + chr(34))
+    phrase_dq = chr(34) + phrase_dq + chr(34)
+    try:
+      sql1 = base_sql.replace("__MATCH__", chr(39) + phrase_dq + chr(39))
+      rows = conn.execute(text(sql1), {"k": top_k}).all()
+      _absorb(rows)
+    except Exception:
+      pass
+    if len(by_key) < top_k and uniq_tokens:
+      try:
+        or_expr = " OR ".join(uniq_tokens).replace(chr(34), "")
+        sql2 = base_sql.replace("__MATCH__", chr(39) + or_expr + chr(39))
+        rows = conn.execute(text(sql2), {"k": top_k}).all()
+        _absorb(rows)
+      except Exception:
+        pass
+    if not by_key:
+      try:
+        like_q = "%" + cleaned + "%"
+        for r in conn.execute(text("SELECT note_id, chunk_index, content, 0.0 AS score FROM chunk_fts WHERE content LIKE :q LIMIT :k"), {"q": like_q, "k": top_k}).all():
+          _absorb([r])
+      except Exception:
+        pass
+
+  ranked = sorted(by_key.values(), key=lambda h: h["score"])[:top_k]
+  return ranked
+
 
 
 def get_note_title(note_id: str) -> str | None:

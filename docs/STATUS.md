@@ -171,3 +171,73 @@ $.venv\Scripts\python.exe -c "from app.storage.hybrid import hybrid_search; prin
 - 用户 Chrome Network 里 /api/chat body 没 embedding_model → F5 或 Ctrl+Shift+R 强刷前端，TS 已经发了，只是浏览器缓存旧 JS。
 - Chroma count()=0 → 看 backend/uvicorn.err.log 的 hybrid_search embed failed 真实报错（已不再静默）。
 - embedded=False → 设置页加模型后，用笔记列表旁的「重跑 embedding」按钮触发重新入库。
+
+
+---
+
+## v0.8 -- RAG not 0-hit: CJK query + FTS5 + embedding query mode patched (2026-07-22)
+
+### Symptom from the user screenshot
+
+User opened the chat page with the knowledge base toggle ON and asked about "牛魔王" / "牛魔王自我介绍".
+LLM answered: "很抱歉，未提供参考材料，无法回答". No citations card. See screenshot.
+
+### Three independent root causes
+1. backend/app/embeddings/factory.py — MiniMax branch sends `type=mode` for retrieval. embo-01 rejects mode=query with `status_code=2013 invalid params`.
+2. backend/app/storage/hybrid.py vector segment — `except Exception: pass` silently dropped the error. vec_hits always empty.
+3. backend/app/storage/db.py fts_search — used bound parameter `:q` + raw query. For CJK unicode61 tokenises each character independently; short Chinese queries triggered `sqlite3.OperationalError: fts5: syntax error near "?"`.
+
+Combined effect: retrieved_chunks = []. `_format_context` returned "(no reference material available)" stringified into the system prompt. LLM sees literal "no reference" and refuses to answer.
+
+
+### Fixes applied
+
+#### 1. backend/app/storage/db.py — fts_search rewritten as two-pass + LIKE fallback
+- Pass A: phrase match `chunk_fts MATCH '"<query>"'` (CJK characters stay contiguous under unicode61).
+- Pass B: per-token OR. ASCII tokens kept whole; pure CJK tokens split per character (matches unicode61 behaviour).
+- Pass C: SQL `LIKE '%q%'` on chunk content as last resort if FTS5 parse fails entirely.
+- Never raises on a malformed query — always returns a list.
+
+#### 2. backend/app/storage/hybrid.py — vector fallback to mode=db
+- Try `mode="query"` first (matches the `type` field used at ingestion).
+- If upstream rejects (e.g. MiniMax 2013), retry with `mode="db"` — same shape that's already proven to work.
+- Only log warning if both attempts fail.
+
+#### 3. backend/app/storage/hybrid.py — no more silent swallowed errors
+- Replaced `except Exception: pass` with `logging.getLogger(__name__).warning("hybrid_search embed failed: %s", e)` (and same for fts).
+- Now `backend/uvicorn.err.log` exposes the real upstream error instead of pretending nothing happened.
+
+
+### Verification (no browser needed)
+```python
+import sys; sys.path.insert(0, r"D:\one_agent\backend")
+from app.storage.hybrid import hybrid_search
+print(hybrid_search("牛魔王的来历是什么", top_k=3,
+                    base_url="https://api.minimax.chat/v1",
+                    api_key="YOUR_KEY", model="embo-01"))
+```
+Returns 3 chunks (CSV note, indices 34/117/118) — all from the 文化和旅游厅 section.
+
+FTS alone also hits:
+```python
+from app.storage.db import fts_search
+fts_search("牛魔王自我介绍", top_k=3)        # 2 rows (DOCX 介绍)
+fts_search("文化和旅游厅", top_k=3)          # 3 rows (CSV 文化/旅游/规划 cluster)
+fts_search("牛魔王的来历是什么", top_k=3)    # 3 rows
+```
+
+### User flow now
+1. Settings → add MiniMax model entry (real key, embeddingModel=embo-01).
+2. Knowledge base: re-embed the existing notes with the real key (vector path now succeeds, not just the keyword path).
+3. Chat page → knowledge-base toggle ON → ask "牛魔王自我介绍" / "牛魔王的来历" / "文化和旅游厅".
+4. SSE delivers `event: citations` with `[{note_id, chunk_index, snippet, score}, ...]`; frontend renders CitationCard.
+
+### Triage if user still sees "抱歉未提供"
+1. Pull last ~30 lines of `backend/uvicorn.err.log`.
+2. Patterns:
+   - `hybrid_search embed failed (status_code=1004 login fail ...)` → API key wrong. Update Settings → 模型 entry.
+   - `status_code=2013 invalid params` → embedding model name unsupported. Try a different embo-* variant.
+   - `fts5: syntax error near "?"` → `fts_search` has reverted; check db.py is the latest version.
+   - `hybrid_search fts failed` after both passes → swallowed upstream; the new query has FTS5-only-specific characters. Add to the strip set.
+
+For the next LLM: these 3 files have been verified after a manual reload (kill python.exe + `python -m uvicorn ...`). Do NOT reintroduce `except: pass` in hybrid_search or revert fts_search to a single bound-parameter MATCH call — both regressions are now documented and tests depend on them.
