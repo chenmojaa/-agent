@@ -1,0 +1,91 @@
+﻿<script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useSessionsStore } from '@/stores/sessions'
+import { useChatStore } from '@/stores/chat'
+import { NSpace, NButton, NScrollbar, NPopconfirm, NEmpty, NSpin, NText } from 'naive-ui'
+
+const sessions = useSessionsStore()
+const chat = useChatStore()
+const route = useRoute()
+const router = useRouter()
+
+const activeId = computed(() => (route.params.id as string) || null)
+
+async function newChat() {
+  chat.clear()
+  router.push({ name: 'chat' })
+}
+
+function gotoNotes() {
+  router.push({ name: 'notes' })
+}
+
+async function openSession(id: string) {
+  if (id === activeId.value) return
+  router.push({ name: 'chat-id', params: { id } })
+}
+
+async function removeSession(id: string, e: Event) {
+  e.stopPropagation()
+  await sessions.remove(id)
+  if (activeId.value === id) {
+    chat.clear()
+    router.push({ name: 'chat' })
+  }
+}
+
+function fmt(s: string) {
+  try { return new Date(s).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
+  catch { return s }
+}
+</script>
+
+<template>
+  <div style="height: 100%; display: flex; flex-direction: column">
+    <div style="padding: 12px 12px 8px; border-bottom: 1px solid #333">
+      <n-button block type="primary" @click="newChat">+ 鏂板璇?/n-button>
+      <n-button block @click="gotoNotes" style="margin-top: 8px">馃摎 鐭ヨ瘑搴?/n-button>
+    </div>
+    <div style="flex: 1; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin">
+      <div v-if="sessions.loading && sessions.items.length === 0" style="padding: 12px 0; display: flex; align-items: center; justify-content: center; gap: 8px">
+        <n-spin size="small" />
+        <n-text depth="3" style="font-size: 12px">鍔犺浇涓€?/n-text>
+      </div>
+      <n-empty v-else-if="sessions.items.length === 0" size="small" description="鐐瑰嚮 + 鏂板璇?寮€濮? style="padding: 24px 0" />
+      <div
+        v-for="s in sessions.items"
+        :key="s.id"
+        @click="openSession(s.id)"
+        :style="{
+          padding: '10px 12px',
+          cursor: 'pointer',
+          borderLeft: s.id === activeId ? '3px solid #3b82f6' : '3px solid transparent',
+          background: s.id === activeId ? 'rgba(59,130,246,0.08)' : 'transparent',
+          borderBottom: '1px solid rgba(255,255,255,0.04)',
+          transition: 'background 0.15s',
+        }"
+        @mouseover="(e: any) => e.currentTarget.style.background = s.id === activeId ? 'rgba(59,130,246,0.12)' : 'rgba(255,255,255,0.03)'"
+        @mouseleave="(e: any) => e.currentTarget.style.background = s.id === activeId ? 'rgba(59,130,246,0.08)' : 'transparent'"
+      >
+        <n-space vertical size="small" :wrap="false" style="overflow: hidden; min-width: 0">
+          <n-space align="center" :wrap="false" justify="space-between" style="width: 100%">
+            <n-text strong style="font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+              {{ s.title }}
+            </n-text>
+            <n-popconfirm @positive-click="removeSession(s.id, $event)">
+              <template #trigger>
+                <n-button text size="small" type="error" @click.stop style="padding: 0 4px; font-size: 11px">鉁?/n-button>
+              </template>
+              鍒犻櫎璇ュ璇濓紵
+            </n-popconfirm>
+          </n-space>
+          <n-text v-if="s.preview" depth="3" style="font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+            {{ s.preview }}
+          </n-text>
+          <n-text depth="3" style="font-size: 10px">{{ fmt(s.updated_at) }} 路 {{ s.message_count }} 鏉?/n-text>
+        </n-space>
+      </div>
+    </div>
+  </div>
+</template>

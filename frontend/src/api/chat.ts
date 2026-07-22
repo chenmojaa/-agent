@@ -1,0 +1,70 @@
+import { streamSse } from './client'
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system"
+  content: string
+}
+
+export interface Citation {
+  note_id: string
+  title?: string
+  chunk_index: number
+  snippet: string
+  score?: number
+}
+
+export interface ChatRequest {
+  messages: ChatMessage[]
+  provider?: string | null
+  model?: string | null
+  use_rag?: boolean
+  session_id?: string | null
+  base_url?: string | null
+  api_key?: string | null
+  reasoning_level?: string | null
+}
+
+export interface ChatStreamEvent {
+  type: "session" | "delta" | "citations" | "done" | "error"
+  session_id?: string
+  data?: string | Citation[],
+}
+
+// 移除 <think>...</think> 思考段落（配对的 + 未闭合的尾部）
+export function stripThink(s: string): string {
+  if (!s) return s
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/gi, '')
+    .replace(/<\/think>/gi, '')
+    .trim()
+}
+
+export async function* chatStream(req: ChatRequest): AsyncGenerator<ChatStreamEvent> {
+  const stream = streamSse("/chat", {
+    messages: req.messages,
+    provider: req.provider || undefined,
+    model: req.model || undefined,
+    use_rag: req.use_rag !== false,
+    session_id: req.session_id || undefined,
+    base_url: req.base_url || undefined,
+    api_key: req.api_key || undefined,
+    reasoning_level: req.reasoning_level || undefined,
+  })
+  for await (const ev of stream) {
+    if (ev.data === "[DONE]") { yield { type: "done" }; return }
+    if (ev.event === "session") {
+      try {
+        const obj = JSON.parse(ev.data)
+        yield { type: "session", session_id: obj.session_id }
+      } catch {}
+    } else if (ev.event === "citations") {
+      try { yield { type: "citations", data: JSON.parse(ev.data) } }
+      catch {}
+    } else if (ev.event === "error") {
+      yield { type: "error", data: ev.data }
+    } else {
+      yield { type: "delta", data: ev.data }
+    }
+  }
+}

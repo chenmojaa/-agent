@@ -1,0 +1,286 @@
+"""Notes REST API."""
+from __future__ import annotations
+
+from typing import Optional
+from fastapi import APIRouter, HTTPException, UploadFile, File, Header
+from pydantic import BaseModel, Field
+from sqlmodel import select
+
+from app.storage.db import Note, get_session
+from app.storage.vector import collection_stats, delete_note_chunks
+from app.tools.ingest import ingest_url, ingest_text, ingest_pdf, ingest_image, ingest_file, _ingest
+from app.storage.vector import delete_note_chunks, add_chunks
+from app.tools.chunk import chunk_text
+from app.embeddings.factory import embed_texts
+
+router = APIRouter(tags=["notes"])
+
+
+class IngestURLRequest(BaseModel):
+  url: str
+  base_url: Optional[str] = Field(None, description="可选 embedding 接口 URL")
+  embedding_model: Optional[str] = Field(None, description="可选 embedding 模型名 例如 embo-01")
+
+
+class IngestTextRequest(BaseModel):
+  text: str
+  title: Optional[str] = None
+  base_url: Optional[str] = Field(None, description="可选 embedding 接口 URL")
+  embedding_model: Optional[str] = Field(None, description="可选 embedding 模型名 例如 embo-01")
+
+
+def _to_dict(note: Note) -> dict:
+  return {
+    "id": note.id,
+    "title": note.title,
+    "source_type": note.source_type,
+    "source_url": note.source_url,
+    "content_path": note.content_path,
+    "summary": note.summary,
+    "tags": note.tags,
+    "word_count": note.word_count,
+    "chunk_count": note.chunk_count,
+    "embedded": note.embedded,
+    "created_at": note.created_at.isoformat() if note.created_at else None,
+  }
+
+
+def _resolve_base_url(body_url: Optional[str], header_url: Optional[str]) -> Optional[str]:
+  return (body_url or header_url or "").strip() or None
+
+
+def _resolve_embedding_model(body_model: Optional[str], header_model: Optional[str]) -> Optional[str]:
+  return (body_model or header_model or "").strip() or None
+
+
+@router.post("/notes/url")
+async def api_ingest_url(
+  body: IngestURLRequest,
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  try:
+    note = ingest_url(
+      body.url,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(body.base_url, x_embedding_base_url),
+      embedding_model=_resolve_embedding_model(body.embedding_model, x_embedding_model),
+    )
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
+  return _to_dict(note)
+
+
+@router.post("/notes/text")
+async def api_ingest_text(
+  body: IngestTextRequest,
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  try:
+    note = ingest_text(
+      body.text,
+      body.title,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(body.base_url, x_embedding_base_url),
+      embedding_model=_resolve_embedding_model(body.embedding_model, x_embedding_model),
+    )
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
+  return _to_dict(note)
+
+
+@router.post("/notes/pdf")
+async def api_ingest_pdf(
+  file: UploadFile = File(...),
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  import os, tempfile
+  from app.config import settings
+  suffix = os.path.splitext(file.filename or "")[1] or ".pdf"
+  fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir=settings.data_dir)
+  os.close(fd)
+  try:
+    content = await file.read()
+    with open(tmp_path, "wb") as f:
+      f.write(content)
+    note = ingest_pdf(
+      tmp_path,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(None, x_embedding_base_url),
+      embedding_model=_resolve_embedding_model(None, x_embedding_model),
+      original_name=name,
+    )
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
+  finally:
+    try: os.unlink(tmp_path)
+    except Exception: pass
+  return _to_dict(note)
+
+
+
+
+@router.post("/notes/image")
+async def api_ingest_image(
+  file: UploadFile = File(...),
+  lang: str = "chi_sim+eng",
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  """Upload an image png/jpg/webp/bmp/tif. OCR via Tesseract."""
+  import os, tempfile
+  from app.config import settings
+  suffix = os.path.splitext(file.filename or "")[1] or ".png"
+  fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir=settings.data_dir)
+  os.close(fd)
+  try:
+    content = await file.read()
+    with open(tmp_path, "wb") as f:
+      f.write(content)
+    note = ingest_image(
+      tmp_path,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(None, x_embedding_base_url),
+      lang=lang,
+      embedding_model=_resolve_embedding_model(None, x_embedding_model),
+      original_name=name,
+    )
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
+  finally:
+    try: os.unlink(tmp_path)
+    except Exception: pass
+  return _to_dict(note)
+
+
+@router.post("/notes/file")
+async def api_ingest_file(
+  file: UploadFile = File(...),
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  """Generic file upload: dispatches by extension pdf/docx/txt/md/image."""
+  import os, tempfile
+  from app.config import settings
+  name = file.filename or "upload.bin"
+  suffix = os.path.splitext(name)[1] or ""
+  fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir=settings.data_dir)
+  os.close(fd)
+  try:
+    content = await file.read()
+    with open(tmp_path, "wb") as f:
+      f.write(content)
+    note = ingest_file(
+      tmp_path,
+      original_name=name,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(None, x_embedding_base_url),
+      embedding_model=_resolve_embedding_model(None, x_embedding_model),
+    )
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
+  finally:
+    try: os.unlink(tmp_path)
+    except Exception: pass
+  return _to_dict(note)
+
+@router.get("/notes")
+async def api_list_notes(limit: int = 50, offset: int = 0):
+  with get_session() as s:
+    stmt = select(Note).order_by(Note.created_at.desc()).offset(offset).limit(limit)
+    notes = s.exec(stmt).all()
+    total = len(s.exec(select(Note)).all())
+  return {"items": [_to_dict(n) for n in notes], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/notes/{note_id}")
+async def api_get_note(note_id: str):
+  with get_session() as s:
+    note = s.get(Note, note_id)
+    if not note:
+      raise HTTPException(status_code=404, detail="Note not found")
+  return _to_dict(note)
+
+
+@router.post("/notes/{note_id}/reembed")
+async def api_reembed_note(
+  note_id: str,
+  x_api_key: str | None = Header(None, alias="X-API-Key"),
+  x_embedding_base_url: str | None = Header(None, alias="X-Embedding-Base-URL"),
+  x_embedding_model: str | None = Header(None, alias="X-Embedding-Model"),
+):
+  """Re-run embedding for an existing note."""
+  import os
+  with get_session() as s:
+    note = s.get(Note, note_id)
+    if not note:
+      raise HTTPException(status_code=404, detail="Note not found")
+    content_path = note.content_path
+    title = note.title
+    note_id_local = note.id
+
+  if not content_path or not os.path.isfile(content_path):
+    raise HTTPException(status_code=400, detail="Note content missing on disk")
+
+  with open(content_path, "r", encoding="utf-8", errors="ignore") as f:
+    content = f.read()
+
+  delete_note_chunks(note_id_local)
+  chunks = chunk_text(content)
+  try:
+    embeddings = embed_texts(
+      chunks,
+      api_key=x_api_key,
+      base_url=_resolve_base_url(None, x_embedding_base_url),
+      model=_resolve_embedding_model(None, x_embedding_model),
+    )
+    n = add_chunks(note_id_local, chunks, embeddings)
+    with get_session() as s:
+      note = s.get(Note, note_id_local)
+      if note:
+        note.chunk_count = n
+        note.embedded = True
+        if chunks:
+          note.summary = chunks[0][:200]
+        s.add(note)
+        s.commit()
+        s.refresh(note)
+        return _to_dict(note)
+  except Exception as e:
+    with get_session() as s:
+      note = s.get(Note, note_id_local)
+      if note:
+        note.summary = f"[embedding failed] {type(e).__name__}: {e}"
+        s.add(note)
+        s.commit()
+    raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/notes/{note_id}")
+async def api_delete_note(note_id: str):
+  with get_session() as s:
+    note = s.get(Note, note_id)
+    if not note:
+      raise HTTPException(status_code=404, detail="Note not found")
+    s.delete(note)
+    s.commit()
+  chunks_deleted = delete_note_chunks(note_id)
+  return {"deleted": note_id, "chunks_deleted": chunks_deleted}
+
+
+@router.get("/notes-stats")
+async def api_stats():
+  with get_session() as s:
+    total = len(s.exec(select(Note)).all())
+    embedded = len(s.exec(select(Note).where(Note.embedded == True)).all())  # noqa: E712
+  return {
+    "sqlite": {"total_notes": total, "embedded_notes": embedded},
+    "chroma": collection_stats(),
+  }
